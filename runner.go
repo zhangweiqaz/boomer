@@ -364,6 +364,7 @@ func (r *slaveRunner) sumUsersAmount(msg *genericMessage) int {
 func (r *slaveRunner) onSpawnMessage(msg *genericMessage) {
 	r.client.sendChannel() <- newGenericMessage("spawning", nil, r.nodeID)
 	workers := r.sumUsersAmount(msg)
+	workers = workers - int(r.numClients)
 	r.startSpawning(workers, float64(workers), r.spawnComplete)
 }
 
