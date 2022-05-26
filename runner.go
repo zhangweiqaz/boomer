@@ -207,7 +207,7 @@ func (r *runner) startSpawning(spawnCount int, spawnRate float64, spawnCompleteF
 	r.stopChan = make(chan bool)
 	r.numClients = 0
 
-	go r.spawnWorkers(spawnCount, r.stopChan, spawnCompleteFunc)
+	r.spawnWorkers(spawnCount, r.stopChan, spawnCompleteFunc)
 }
 
 func (r *runner) stop() {
