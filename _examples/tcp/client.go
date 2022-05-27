@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/zhangweiqaz/boomer"
+	"github.com/zhangweiqaz/boomer_longconnection"
 	"log"
 	"net"
 	"os/signal"

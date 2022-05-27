@@ -1,4 +1,4 @@
-module github.com/zhangweiqaz/boomer
+module github.com/zhangweiqaz/boomer_longconnection
 
 go 1.13
 
