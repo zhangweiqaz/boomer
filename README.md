@@ -1,3 +1,16 @@
+# 自行修改说明
+原先的boomer不太支持长连接压测，这里改了一版可以支持长连接的版本。由于本人go开发水平有限，做不到和原先功能兼容，大概率是和不进原作者仓库了。
+主要做了如下改动：
+* 每轮spawn启动的协程客户端循环执行客户端逻辑，不退出。函数退出或者异常退出，都会被协程自动拉起
+* locust每次下发该worker需要运行的客户端数目后，spawn会扣减已经启动的客户端，只启动新增部分
+* locust下发stop信息时，停止所有的协程客户端
+遗留问题：
+* 限流功能未做测试，可能在这种场景下有问题
+* 单元测试用例未修正
+详细案例请参考_examples下的tcp文件夹
+以下为原仓库文档
+
+
 # boomer [![Build Status](https://travis-ci.org/myzhan/boomer.svg?branch=master)](https://travis-ci.org/myzhan/boomer) [![Go Report Card](https://goreportcard.com/badge/github.com/myzhan/boomer)](https://goreportcard.com/report/github.com/myzhan/boomer) [![Coverage Status](https://codecov.io/gh/myzhan/boomer/branch/master/graph/badge.svg)](https://codecov.io/gh/myzhan/boomer) [![Documentation Status](https://readthedocs.org/projects/boomer/badge/?version=latest)](https://boomer.readthedocs.io/en/latest/?badge=latest)
 
 ## Links

@@ -1,6 +1,7 @@
 package boomer
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math/rand"
@@ -53,7 +54,7 @@ type runner struct {
 
 // safeRun runs fn and recovers from unexpected panics.
 // it prevents panics from Task.Fn crashing boomer.
-func (r *runner) safeRun(fn func()) {
+func (r *runner) safeRun(ctx context.Context, fn func(ctx context.Context)) {
 	defer func() {
 		// don't panic
 		err := recover()
@@ -65,7 +66,7 @@ func (r *runner) safeRun(fn func()) {
 			os.Stderr.Write(stackTrace)
 		}
 	}()
-	fn()
+	fn(ctx)
 }
 
 func (r *runner) addOutput(o Output) {
@@ -88,7 +89,7 @@ func (r *runner) outputOnStart() {
 	wg.Wait()
 }
 
-func (r *runner) outputOnEevent(data map[string]interface{}) {
+func (r *runner) outputOnEvent(data map[string]interface{}) {
 	size := len(r.outputs)
 	if size == 0 {
 		return
@@ -120,40 +121,39 @@ func (r *runner) outputOnStop() {
 	wg.Wait()
 }
 
-func (r *runner) spawnWorkers(spawnCount int, quit chan bool, spawnCompleteFunc func()) {
+func (r *runner) spawnWorkers(ctx context.Context, spawnCount int, spawnCompleteFunc func()) {
 	log.Println("Spawning", spawnCount, "clients immediately")
-
+	clientQuitChan := make(chan bool)
+	Events.SubscribeOnce(EVENT_STOP, func() {
+		log.Println("clientQuitChan：获取到 stop信号")
+		close(clientQuitChan)
+	})
 	for i := 1; i <= spawnCount; i++ {
-		select {
-		case <-quit:
-			// quit spawning goroutine
-			return
-		case <-r.shutdownChan:
-			return
-		default:
-			atomic.AddInt32(&r.numClients, 1)
-			go func() {
-				for {
-					select {
-					case <-quit:
-						return
-					case <-r.shutdownChan:
-						return
-					default:
-						if r.rateLimitEnabled {
-							blocked := r.rateLimiter.Acquire()
-							if !blocked {
-								task := r.getTask()
-								r.safeRun(task.Fn)
-							}
-						} else {
+		atomic.AddInt32(&r.numClients, 1)
+		log.Println("client + 1, now client:", r.numClients)
+		go func() {
+			for {
+				// log.Println("spawnWorkers loop")
+				select {
+				case <-clientQuitChan:
+					// log.Println("spawnWorkers：获取到 stop信号")
+					return
+				case <-r.shutdownChan:
+					return
+				default:
+					if r.rateLimitEnabled {
+						blocked := r.rateLimiter.Acquire()
+						if !blocked {
 							task := r.getTask()
-							r.safeRun(task.Fn)
+							r.safeRun(ctx, task.Fn)
 						}
+					} else {
+						task := r.getTask()
+						r.safeRun(ctx, task.Fn)
 					}
 				}
-			}()
-		}
+			}
+		}()
 	}
 
 	if spawnCompleteFunc != nil {
@@ -201,23 +201,19 @@ func (r *runner) getTask() *Task {
 	return nil
 }
 
-func (r *runner) startSpawning(spawnCount int, spawnRate float64, spawnCompleteFunc func()) {
+func (r *runner) startSpawning(ctx context.Context, spawnCount int, spawnRate float64, spawnCompleteFunc func()) {
 	Events.Publish(EVENT_SPAWN, spawnCount, spawnRate)
-
-	r.stopChan = make(chan bool)
-	r.numClients = 0
-
-	r.spawnWorkers(spawnCount, r.stopChan, spawnCompleteFunc)
+	r.spawnWorkers(ctx, spawnCount, spawnCompleteFunc)
 }
 
 func (r *runner) stop() {
 	// publish the boomer stop event
-	// user's code can subscribe to this event and do thins like cleaning up
+	// user's code can subscribe to this event and do things like cleaning up
+	log.Println("publish event：EVENT_STOP")
 	Events.Publish(EVENT_STOP)
 
 	// stop previous goroutines without blocking
 	// those goroutines will exit when r.safeRun returns
-	close(r.stopChan)
 }
 
 type localRunner struct {
@@ -242,7 +238,7 @@ func newLocalRunner(tasks []*Task, rateLimiter RateLimiter, spawnCount int, spaw
 	return r
 }
 
-func (r *localRunner) run() {
+func (r *localRunner) run(ctx context.Context) {
 	r.state = stateInit
 	r.stats.start()
 	r.outputOnStart()
@@ -254,8 +250,8 @@ func (r *localRunner) run() {
 			select {
 			case data := <-r.stats.messageToRunnerChan:
 				data["user_count"] = r.numClients
-				r.outputOnEevent(data)
-			case <-r.shutdownChan:
+				r.outputOnEvent(data)
+			case <-ctx.Done():
 				Events.Publish(EVENT_QUIT)
 				r.stop()
 				wg.Done()
@@ -268,7 +264,7 @@ func (r *localRunner) run() {
 	if r.rateLimitEnabled {
 		r.rateLimiter.Start()
 	}
-	r.startSpawning(r.spawnCount, r.spawnRate, nil)
+	r.startSpawning(ctx, r.spawnCount, r.spawnRate, nil)
 
 	wg.Wait()
 }
@@ -361,15 +357,16 @@ func (r *slaveRunner) sumUsersAmount(msg *genericMessage) int {
 // But user count is divided by user classes defined in locustfile, because locust assumes that
 // master and workers use the same locustfile. Before we find a better way to deal with this,
 // boomer sums up the total amout of users in spawn message and uses task weight to spawn goroutines like before.
-func (r *slaveRunner) onSpawnMessage(msg *genericMessage) {
+func (r *slaveRunner) onSpawnMessage(ctx context.Context, msg *genericMessage) {
 	r.client.sendChannel() <- newGenericMessage("spawning", nil, r.nodeID)
 	workers := r.sumUsersAmount(msg)
+	log.Println("now client: ", r.numClients, "expect client: ", workers)
 	workers = workers - int(r.numClients)
-	r.startSpawning(workers, float64(workers), r.spawnComplete)
+	r.startSpawning(ctx, workers, float64(workers), r.spawnComplete)
 }
 
 // Runner acts as a state machine.
-func (r *slaveRunner) onMessage(msgInterface message) {
+func (r *slaveRunner) onMessage(ctx context.Context, msgInterface message) {
 	msg, ok := msgInterface.(*genericMessage)
 	if !ok {
 		log.Println("Receive unknown type of meesage from master.")
@@ -380,10 +377,12 @@ func (r *slaveRunner) onMessage(msgInterface message) {
 	case stateInit:
 		switch msg.Type {
 		case "spawn":
+			log.Println("stateInit.spawn")
 			r.state = stateSpawning
 			r.stats.clearStatsChan <- true
-			r.onSpawnMessage(msg)
+			r.onSpawnMessage(ctx, msg)
 		case "quit":
+			log.Println("stateInit.quit")
 			Events.Publish(EVENT_QUIT)
 		}
 	case stateSpawning:
@@ -391,17 +390,21 @@ func (r *slaveRunner) onMessage(msgInterface message) {
 	case stateRunning:
 		switch msg.Type {
 		case "spawn":
+			log.Println("stateRunning.spawn")
 			r.state = stateSpawning
-			r.stop()
-			r.onSpawnMessage(msg)
+			//r.stop()
+			r.onSpawnMessage(ctx, msg)
 		case "stop":
+			log.Println("stateRunning.stop")
 			r.stop()
 			r.state = stateStopped
+			r.numClients = 0
 			log.Println("Recv stop message from master, all the goroutines are stopped")
 			r.client.sendChannel() <- newGenericMessage("client_stopped", nil, r.nodeID)
 			r.client.sendChannel() <- newClientReadyMessage("client_ready", -1, r.nodeID)
 			r.state = stateInit
 		case "quit":
+			log.Println("stateRunning.stop")
 			r.stop()
 			log.Println("Recv quit message from master, all the goroutines are stopped")
 			Events.Publish(EVENT_QUIT)
@@ -410,30 +413,32 @@ func (r *slaveRunner) onMessage(msgInterface message) {
 	case stateStopped:
 		switch msg.Type {
 		case "spawn":
+			log.Println("stateStopped.spawn")
 			r.state = stateSpawning
 			r.stats.clearStatsChan <- true
-			r.onSpawnMessage(msg)
+			r.onSpawnMessage(ctx, msg)
 		case "quit":
+			log.Println("stateStopped.quit")
 			Events.Publish(EVENT_QUIT)
 			r.state = stateInit
 		}
 	}
 }
 
-func (r *slaveRunner) startListener() {
+func (r *slaveRunner) startListener(ctx context.Context) {
 	go func() {
 		for {
 			select {
 			case msg := <-r.client.recvChannel():
-				r.onMessage(msg)
-			case <-r.shutdownChan:
+				r.onMessage(ctx, msg)
+			case <-ctx.Done():
 				return
 			}
 		}
 	}()
 }
 
-func (r *slaveRunner) run() {
+func (r *slaveRunner) run(ctx context.Context) {
 	r.state = stateInit
 	r.client = newClient(r.masterHost, r.masterPort, r.nodeID)
 
@@ -448,7 +453,7 @@ func (r *slaveRunner) run() {
 	}
 
 	// listen to master
-	r.startListener()
+	r.startListener(ctx)
 
 	r.stats.start()
 	r.outputOnStart()
@@ -472,8 +477,8 @@ func (r *slaveRunner) run() {
 				data["user_count"] = r.numClients
 				data["user_classes_count"] = r.userClassesCountFromMaster
 				r.client.sendChannel() <- newGenericMessage("stats", data, r.nodeID)
-				r.outputOnEevent(data)
-			case <-r.shutdownChan:
+				r.outputOnEvent(data)
+			case <-ctx.Done():
 				r.outputOnStop()
 				return
 			}
@@ -493,7 +498,7 @@ func (r *slaveRunner) run() {
 					"current_cpu_usage": CPUUsage,
 				}
 				r.client.sendChannel() <- newGenericMessage("heartbeat", data, r.nodeID)
-			case <-r.shutdownChan:
+			case <-ctx.Done():
 				return
 			}
 		}

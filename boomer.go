@@ -1,12 +1,10 @@
 package boomer
 
 import (
+	"context"
 	"flag"
 	"log"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -98,7 +96,7 @@ func (b *Boomer) EnableMemoryProfile(memoryProfile string, duration time.Duratio
 }
 
 // Run accepts a slice of Task and connects to the locust master.
-func (b *Boomer) Run(tasks ...*Task) {
+func (b *Boomer) Run(ctx context.Context, tasks ...*Task) {
 	if b.cpuProfile != "" {
 		err := StartCPUProfile(b.cpuProfile, b.cpuProfileDuration)
 		if err != nil {
@@ -118,13 +116,13 @@ func (b *Boomer) Run(tasks ...*Task) {
 		for _, o := range b.outputs {
 			b.slaveRunner.addOutput(o)
 		}
-		b.slaveRunner.run()
+		b.slaveRunner.run(ctx)
 	case StandaloneMode:
 		b.localRunner = newLocalRunner(tasks, b.rateLimiter, b.spawnCount, b.spawnRate)
 		for _, o := range b.outputs {
 			b.localRunner.addOutput(o)
 		}
-		b.localRunner.run()
+		b.localRunner.run(ctx)
 	default:
 		log.Println("Invalid mode, expected boomer.DistributedMode or boomer.StandaloneMode")
 	}
@@ -198,7 +196,7 @@ func (b *Boomer) Quit() {
 }
 
 // Run tasks without connecting to the master.
-func runTasksForTest(tasks ...*Task) {
+func runTasksForTest(ctx context.Context, tasks ...*Task) {
 	taskNames := strings.Split(runTasks, ",")
 	for _, task := range tasks {
 		if task.Name == "" {
@@ -207,7 +205,7 @@ func runTasksForTest(tasks ...*Task) {
 			for _, name := range taskNames {
 				if name == task.Name {
 					log.Println("Running " + task.Name)
-					task.Fn()
+					task.Fn(ctx)
 				}
 			}
 		}
@@ -216,18 +214,18 @@ func runTasksForTest(tasks ...*Task) {
 
 // Run accepts a slice of Task and connects to a locust master.
 // It's a convenience function to use the defaultBoomer.
-func Run(tasks ...*Task) {
+func Run(ctx context.Context, tasks ...*Task) {
 	if !flag.Parsed() {
 		flag.Parse()
 	}
 
 	if runTasks != "" {
-		runTasksForTest(tasks...)
+		runTasksForTest(ctx, tasks...)
 		return
 	}
-
-	initLegacyEventHandlers()
-
+	// 注册请求记录处理函数, 暂时关闭这种方式，直接调用record
+	// initLegacyEventHandlers()
+	// 创建限流，需要测试在长连接机制下是否正常
 	rateLimiter, err := createRateLimiter(maxRPS, requestIncreaseRate)
 	if err != nil {
 		log.Fatalf("%v\n", err)
@@ -238,22 +236,19 @@ func Run(tasks ...*Task) {
 	defaultBoomer.EnableMemoryProfile(memoryProfile, memoryProfileDuration)
 	defaultBoomer.EnableCPUProfile(cpuProfile, cpuProfileDuration)
 
-	defaultBoomer.Run(tasks...)
+	defaultBoomer.Run(ctx, tasks...)
 
 	quitByMe := false
+	// 退出时间通知
 	quitChan := make(chan bool)
-
 	Events.SubscribeOnce(EVENT_QUIT, func() {
 		if !quitByMe {
 			close(quitChan)
 		}
 	})
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
-
 	select {
-	case <-c:
+	case <-ctx.Done():
 		quitByMe = true
 		defaultBoomer.Quit()
 	case <-quitChan:
